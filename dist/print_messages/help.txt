@@ -1,0 +1,9 @@
+httpc is a curl-like application but supports HTTP protocol only.
+Usage:
+    httpc command [arguments]
+The commands are:
+    get     executes a HTTP GET request and prints the response.
+    post    executes a HTTP POST request and prints the response.
+    help    prints this screen.
+
+Use "httpc help [command]" for more information about a command.
