@@ -1,55 +1,140 @@
-# Selective Repeat Protocol Implementation
+# Selective Repeat Over UDP in Go
+
+This project implements reliable HTTP-style file transfer over UDP using a selective-repeat sliding window protocol. It includes a UDP transport layer, a curl-like client, and a file server that exchanges HTTP/1.0 requests and responses across a router-compatible packet format.
+
 ## Overview
-This project implements the selective repeat protocol for reliable data transmission over a network using UDP. The selective repeat protocol is a sliding window protocol that allows the sender to send multiple packets before receiving an acknowledgment for each one. This improves network efficiency by minimizing the number of retransmissions.
+
+The repository is organized around a few focused components:
+
+- A packet protocol with a compact router-compatible wire format.
+- A selective-repeat transport layer for reliable UDP delivery.
+- An HTTP wire package for request and response encoding.
+- A file server that serves and writes files within a configured data directory.
+- A command-line client and server built on top of those internal packages.
 
 ## Features
-1. Selective Repeat Protocol Implementation
-- Reliable Data Transmission: Implements the selective repeat protocol, a sliding window protocol that ensures reliable data transmission over a network.
-- Packet Retransmission: Handles packet retransmission for packets that are not acknowledged within a specified timeout period, ensuring data integrity.
-- Selective Repeat Strategy: Utilizes a selective repeat strategy to resend only those packets that have not been acknowledged by the receiver, optimizing network efficiency.
-2. Threading for Concurrent Execution
-- Concurrency with Threading: Utilizes threading to enable concurrent execution of various tasks, such as sending data packets, monitoring for timeouts, and receiving acknowledgments.
-- Improved Performance: Enhances performance by allowing multiple tasks to execute concurrently without blocking each other, leading to efficient utilization of system resources.
-3. Robust Error Handling
-- Packet Loss Mitigation: Implements robust error handling mechanisms to mitigate the effects of packet loss during transmission, ensuring reliable data delivery even in the presence of network disruptions.
-- Out-of-Order Delivery Handling: Handles out-of-order packet delivery by maintaining a buffer to reorder received packets before processing them, maintaining data integrity.
-- Timeout Handling: Monitors for packet timeouts and initiates appropriate actions, such as packet retransmission, to recover from network delays or unresponsive receivers.
-4. Integration with File Server Application
-- Seamless File Transfer: Seamlessly integrates with a file server application to facilitate reliable file transfer over the network using the selective repeat protocol.
-- GET Request Support: Supports GET requests to retrieve files from the server, ensuring accurate and efficient data retrieval.
-- POST Request Support: Supports POST requests to upload files to the server, providing a reliable mechanism for data transmission and storage.
-5. Customizable Network Configuration
-- Router Configuration: Allows configuration of router parameters such as port number, drop rate, maximum delay, and seed value, providing flexibility in simulating various network conditions.
-- Server Configuration: Enables configuration of server parameters such as port number and verbosity level, allowing customization based on specific requirements.
-6. Detailed Logging and Debugging
-- Verbose Output: Provides verbose output during execution to facilitate debugging and troubleshooting, offering detailed insights into the protocol operation and network interactions.
-- Logging Mechanism: Implements a logging mechanism to record key events, packet transmissions, timeouts, and acknowledgments, aiding in post-mortem analysis and performance optimization.
 
-## Usage
-To use the project, follow these steps:
+- Reliable delivery over UDP using selective repeat.
+- Sliding-window transmission with retransmission on timeout.
+- Explicit session lifecycle using `SYN`, `DATA`, and `FIN` control packets.
+- HTTP/1.0 request and response exchange over the UDP transport.
+- File download and upload support through `GET` and `POST`.
+- Safe path resolution to prevent escaping the configured server root.
+- Backward-compatible CLI flags for the provided networking workflow.
 
-1. Start the router:
-```bash
-   ./router.exe --port 3000 --drop-rate 0.3 --max-delay 100ms --seed 1
-```
-2. Start the HTTP file server:
-```bash
-   ./httpfs -v -p 8007
-```
-3. Perform a GET request:
-```bash
-   ./httpc get --serverhost 'http://localhost/sample.txt' --serverport 8007 --routerhost localhost --routerport 3000
+## Project Layout
+
+```text
+.
+|-- cmd
+|   |-- httpc          # UDP HTTP client CLI
+|   `-- httpfs         # UDP file server CLI
+|-- examples
+|   `-- data           # Sample files for local testing
+|-- internal
+|   |-- fileserver     # File-serving logic
+|   |-- httpwire       # HTTP/1.0 request and response helpers
+|   |-- protocol       # Packet definitions and binary encoding
+|   `-- transport      # Selective-repeat listener, dialer, and session logic
+|-- dist
+|   `-- router.exe     # Router binary for local Windows testing
+`-- go.mod
 ```
 
-4. Perform a POST request:
-```bash
-   ./httpc post -v --serverhost 'http://localhost/sample3.txt' --d your_file_path.txt --serverport 8007 --routerhost localhost --routerport 3000
+## Requirements
+
+- Go 1.22 or newer
+- IPv4 networking
+- A compatible UDP router
+
+For Windows-based local testing, the repository includes `dist/router.exe`.
+
+## Build
+
+```powershell
+go build -o .\bin\httpc.exe .\cmd\httpc
+go build -o .\bin\httpfs.exe .\cmd\httpfs
 ```
 
-Replace `'your_file_path.txt'` with the path to the file you want to upload in the POST request.
+## Run Locally
 
-## Dependencies
-- Python 3.x
+Start the router:
 
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```powershell
+.\dist\router.exe --port 3000 --drop-rate 0 --max-delay 0ms --seed 1
+```
+
+Start the file server:
+
+```powershell
+.\bin\httpfs.exe -v -p 8007 -d .\examples\data
+```
+
+Issue a GET request:
+
+```powershell
+.\bin\httpc.exe get --router-host localhost --router-port 3000 http://localhost:8007/sample.txt
+```
+
+Issue a POST request:
+
+```powershell
+.\bin\httpc.exe post --router-host localhost --router-port 3000 -f .\examples\data\upload.txt http://localhost:8007/uploads/posted.txt
+```
+
+## CLI Reference
+
+### `httpc`
+
+```text
+httpc get [options] URL
+httpc post [options] [-d data | -f file] URL
+httpc help [get|post]
+```
+
+Common options:
+
+- `-v`, `--verbose`: include the status line and headers in the output.
+- `-H`, `--header`: add a request header in `key:value` format. Repeatable.
+- `-o`, `--output`: write the response to a file.
+- `--router-host`: router hostname. Default `localhost`.
+- `--router-port`: router UDP port. Default `3000`.
+- `--server-port`: fallback UDP server port when the URL omits a port. Default `8007`.
+- `--timeout`: retransmission timeout. Default `2s`.
+- `--deadline`: overall request deadline. Default `30s`.
+- `--window-size`: selective-repeat window size. Default `5`.
+
+Supported compatibility aliases:
+
+- `--serverhost`
+- `--serverport`
+- `--routerhost`
+- `--routerport`
+
+### `httpfs`
+
+```text
+httpfs [options]
+```
+
+Options:
+
+- `-p`, `--port`: UDP listening port. Default `8007`.
+- `-d`, `--dir`: data directory to expose. Default current directory.
+- `-v`, `--verbose`: enable request logging.
+- `--timeout`: retransmission timeout. Default `2s`.
+- `--session-deadline`: per-request deadline. Default `30s`.
+- `--window-size`: selective-repeat window size. Default `5`.
+
+## Protocol Notes
+
+- Packet headers contain packet type, sequence number, peer IPv4 address, peer port, and payload.
+- The transport uses per-packet acknowledgment tracking within a fixed send window.
+- `SYN` and `SYN-ACK` establish a session.
+- `DATA` and `DATA-ACK` carry request and response payloads.
+- `FIN` and `FIN-ACK` terminate a complete logical message.
+
+## Limitations
+
+- The wire format is IPv4-only because packet headers store four-byte IP addresses.
+- The server processes one session at a time on a single UDP listener.
