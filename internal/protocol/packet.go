@@ -37,6 +37,9 @@ func (p Packet) MarshalBinary() ([]byte, error) {
 	if ipv4 == nil {
 		return nil, fmt.Errorf("peer address must be IPv4: %v", p.PeerIP)
 	}
+	if !isKnownPacketType(p.Type) {
+		return nil, fmt.Errorf("unknown packet type: %d", p.Type)
+	}
 	if len(p.Payload) > MaxPayloadSize {
 		return nil, fmt.Errorf("payload too large: %d > %d", len(p.Payload), MaxPayloadSize)
 	}
@@ -55,6 +58,9 @@ func UnmarshalPacket(raw []byte) (Packet, error) {
 	if len(raw) < HeaderSize {
 		return Packet{}, fmt.Errorf("packet too short: got %d bytes", len(raw))
 	}
+	if len(raw) > MaxPacketSize {
+		return Packet{}, fmt.Errorf("packet too large: got %d bytes", len(raw))
+	}
 
 	packet := Packet{
 		Type:     PacketType(raw[0]),
@@ -62,6 +68,9 @@ func UnmarshalPacket(raw []byte) (Packet, error) {
 		PeerIP:   net.IPv4(raw[5], raw[6], raw[7], raw[8]).To4(),
 		PeerPort: binary.BigEndian.Uint16(raw[9:11]),
 		Payload:  append([]byte(nil), raw[11:]...),
+	}
+	if !isKnownPacketType(packet.Type) {
+		return Packet{}, fmt.Errorf("unknown packet type: %d", packet.Type)
 	}
 
 	return packet, nil
@@ -90,5 +99,14 @@ func (t PacketType) String() string {
 		return "DATA-ACK"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
+	}
+}
+
+func isKnownPacketType(packetType PacketType) bool {
+	switch packetType {
+	case TypeSYN, TypeSYNACK, TypeFIN, TypeFINACK, TypeData, TypeDataACK:
+		return true
+	default:
+		return false
 	}
 }

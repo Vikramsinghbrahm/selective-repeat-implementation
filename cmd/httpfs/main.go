@@ -25,9 +25,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		port            int
 		dataDir         string
 		verbose         bool
+		logTransport    bool
 		timeout         time.Duration
 		sessionDeadline time.Duration
+		metricsInterval time.Duration
 		windowSize      int
+		maxMessageSize  int
 	)
 
 	flags := flag.NewFlagSet("httpfs", flag.ContinueOnError)
@@ -38,9 +41,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&dataDir, "dir", ".", "Directory exposed by the file server.")
 	flags.BoolVar(&verbose, "v", false, "Enable request logging.")
 	flags.BoolVar(&verbose, "verbose", false, "Enable request logging.")
-	flags.DurationVar(&timeout, "timeout", 2*time.Second, "Selective-repeat retransmission timeout.")
+	flags.BoolVar(&logTransport, "log-transport", false, "Enable transport session and RTO logging.")
+	flags.DurationVar(&timeout, "timeout", 2*time.Second, "Initial retransmission timeout.")
 	flags.DurationVar(&sessionDeadline, "session-deadline", 30*time.Second, "Per-request deadline.")
+	flags.DurationVar(&metricsInterval, "metrics-interval", 0, "Periodic transport metrics logging interval. Set 0 to disable.")
 	flags.IntVar(&windowSize, "window-size", 5, "Selective-repeat send window size.")
+	flags.IntVar(&maxMessageSize, "max-message-size", 8<<20, "Maximum transport message size in bytes.")
 	flags.Usage = func() {
 		printUsage(stderr)
 	}
@@ -55,27 +61,42 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("httpfs does not accept positional arguments")
 	}
 
-	logger := log.New(io.Discard, "", log.LstdFlags)
+	requestLogger := log.New(io.Discard, "", log.LstdFlags)
 	if verbose {
-		logger = log.New(stdout, "httpfs: ", log.LstdFlags)
+		requestLogger = log.New(stdout, "httpfs: ", log.LstdFlags)
 	}
 
-	handler, err := fileserver.New(dataDir, logger)
+	transportLogger := requestLogger
+	if !verbose && (logTransport || metricsInterval > 0) {
+		transportLogger = log.New(stdout, "httpfs: ", log.LstdFlags)
+	}
+
+	metrics := transport.NewMetrics()
+	handler, err := fileserver.New(dataDir, requestLogger)
 	if err != nil {
 		return err
 	}
 
 	listener, err := transport.Listen(port, transport.Config{
-		WindowSize: windowSize,
-		Timeout:    timeout,
-		Logger:     logger,
+		WindowSize:     windowSize,
+		Timeout:        timeout,
+		MaxMessageSize: maxMessageSize,
+		LogEvents:      logTransport,
+		Logger:         transportLogger,
+		Metrics:        metrics,
 	})
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 
-	logger.Printf("serving %s on UDP :%d", dataDir, port)
+	transportLogger.Printf("serving %s on UDP :%d", dataDir, port)
+
+	if metricsInterval > 0 {
+		metricsCtx, cancelMetrics := context.WithCancel(context.Background())
+		defer cancelMetrics()
+		go logMetricsLoop(metricsCtx, transportLogger, metrics, metricsInterval)
+	}
 
 	for {
 		session, err := listener.Accept(context.Background())
@@ -83,18 +104,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 
-		if err := serveSession(handler, session, sessionDeadline, logger); err != nil {
-			logger.Printf("session error: %v", err)
-		}
+		go func(session *transport.Session) {
+			if err := serveSession(handler, session, sessionDeadline); err != nil {
+				transportLogger.Printf("session error remote=%s err=%v", session.RemoteAddr(), err)
+			}
+		}(session)
 	}
 }
 
-func serveSession(handler *fileserver.Handler, session *transport.Session, deadline time.Duration, logger *log.Logger) error {
+func serveSession(handler *fileserver.Handler, session *transport.Session, deadline time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	defer session.Close()
-
-	logger.Printf("accepted %s", session.RemoteAddr())
 
 	requestBytes, err := session.ReceiveMessage(ctx, 2)
 	if err != nil {
@@ -113,6 +134,20 @@ func serveSession(handler *fileserver.Handler, session *transport.Session, deadl
 	return nil
 }
 
+func logMetricsLoop(ctx context.Context, logger *log.Logger, metrics *transport.Metrics, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			logger.Printf("metrics %s", metrics.Snapshot())
+		}
+	}
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "httpfs serves files over HTTP/1.0 using the selective-repeat UDP transport.")
 	fmt.Fprintln(w)
@@ -123,7 +158,10 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -p, --port             UDP port to listen on. Default: 8007.")
 	fmt.Fprintln(w, "  -d, --dir              Directory exposed by the file server. Default: current directory.")
 	fmt.Fprintln(w, "  -v, --verbose          Enable request logging.")
-	fmt.Fprintln(w, "  --timeout              Retransmission timeout. Default: 2s.")
+	fmt.Fprintln(w, "  --log-transport        Enable transport session and RTO logging.")
+	fmt.Fprintln(w, "  --timeout              Initial retransmission timeout. Default: 2s.")
 	fmt.Fprintln(w, "  --session-deadline     Per-request deadline. Default: 30s.")
+	fmt.Fprintln(w, "  --metrics-interval     Periodic transport metrics logging interval. Default: 0 (disabled).")
 	fmt.Fprintln(w, "  --window-size          Sliding window size. Default: 5.")
+	fmt.Fprintln(w, "  --max-message-size     Maximum transport message size in bytes. Default: 8388608.")
 }

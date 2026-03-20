@@ -169,6 +169,10 @@ func (h *Handler) directoryListing(target string) ([]byte, error) {
 }
 
 func (h *Handler) resolvePath(requestPath string) (string, error) {
+	if attemptsToEscapeRoot(requestPath) {
+		return "", fmt.Errorf("path %q escapes %s", requestPath, h.root)
+	}
+
 	cleanPath := path.Clean("/" + requestPath)
 	relativePath := strings.TrimPrefix(cleanPath, "/")
 	if relativePath == "." {
@@ -186,6 +190,26 @@ func (h *Handler) resolvePath(requestPath string) (string, error) {
 	}
 
 	return target, nil
+}
+
+func attemptsToEscapeRoot(requestPath string) bool {
+	depth := 0
+
+	for _, segment := range strings.Split(strings.ReplaceAll(requestPath, "\\", "/"), "/") {
+		switch segment {
+		case "", ".":
+			continue
+		case "..":
+			if depth == 0 {
+				return true
+			}
+			depth--
+		default:
+			depth++
+		}
+	}
+
+	return false
 }
 
 func (h *Handler) responseFromFSError(err error) ([]byte, error) {

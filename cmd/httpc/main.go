@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,16 +52,19 @@ func (h headerFlags) HTTPHeader() (http.Header, error) {
 }
 
 type commonOptions struct {
-	verbose    bool
-	output     string
-	routerHost string
-	routerPort int
-	serverPort int
-	timeout    time.Duration
-	deadline   time.Duration
-	windowSize int
-	legacyURL  string
-	headers    headerFlags
+	verbose        bool
+	output         string
+	routerHost     string
+	routerPort     int
+	serverPort     int
+	timeout        time.Duration
+	deadline       time.Duration
+	windowSize     int
+	maxMessageSize int
+	legacyURL      string
+	logTransport   bool
+	showMetrics    bool
+	headers        headerFlags
 }
 
 func main() {
@@ -139,12 +143,19 @@ func runGet(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	transportLogger := newTransportLogger(stderr, options.logTransport || options.showMetrics)
+	metrics := transport.NewMetrics()
+
 	ctx, cancel := context.WithTimeout(context.Background(), options.deadline)
 	defer cancel()
 
-	responseBytes, err := exchange(ctx, options, serverHost, serverPort, requestBytes)
+	responseBytes, err := exchange(ctx, options, transportLogger, metrics, serverHost, serverPort, requestBytes)
 	if err != nil {
 		return err
+	}
+
+	if options.showMetrics {
+		transportLogger.Printf("metrics %s", metrics.Snapshot())
 	}
 
 	response, body, err := httpwire.ParseResponse(responseBytes, request)
@@ -208,12 +219,19 @@ func runPost(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	transportLogger := newTransportLogger(stderr, options.logTransport || options.showMetrics)
+	metrics := transport.NewMetrics()
+
 	ctx, cancel := context.WithTimeout(context.Background(), options.deadline)
 	defer cancel()
 
-	responseBytes, err := exchange(ctx, options, serverHost, serverPort, requestBytes)
+	responseBytes, err := exchange(ctx, options, transportLogger, metrics, serverHost, serverPort, requestBytes)
 	if err != nil {
 		return err
+	}
+
+	if options.showMetrics {
+		transportLogger.Printf("metrics %s", metrics.Snapshot())
 	}
 
 	response, responseBody, err := httpwire.ParseResponse(responseBytes, request)
@@ -243,9 +261,12 @@ func newCommonFlagSet(name string, options *commonOptions) *flag.FlagSet {
 	flags.IntVar(&options.routerPort, "routerport", 3000, "Router port.")
 	flags.IntVar(&options.serverPort, "server-port", 8007, "Default UDP server port when the URL omits one.")
 	flags.IntVar(&options.serverPort, "serverport", 8007, "Default UDP server port when the URL omits one.")
-	flags.DurationVar(&options.timeout, "timeout", 2*time.Second, "Selective-repeat retransmission timeout.")
+	flags.DurationVar(&options.timeout, "timeout", 2*time.Second, "Initial retransmission timeout.")
 	flags.DurationVar(&options.deadline, "deadline", 30*time.Second, "Overall request deadline.")
 	flags.IntVar(&options.windowSize, "window-size", 5, "Selective-repeat send window size.")
+	flags.IntVar(&options.maxMessageSize, "max-message-size", 8<<20, "Maximum transport message size in bytes.")
+	flags.BoolVar(&options.logTransport, "log-transport", false, "Enable transport session and RTO logging.")
+	flags.BoolVar(&options.showMetrics, "metrics", false, "Print aggregate transport metrics to stderr after the request completes.")
 	flags.StringVar(&options.legacyURL, "serverhost", "", "Legacy URL flag kept for backward compatibility.")
 	flags.Var(&options.headers, "H", "Add a request header using key:value format.")
 	flags.Var(&options.headers, "header", "Add a request header using key:value format.")
@@ -296,7 +317,7 @@ func resolveTarget(positional string, legacyURL string, defaultPort int) (*url.U
 	return parsed, host, port, nil
 }
 
-func exchange(ctx context.Context, options commonOptions, serverHost string, serverPort int, requestBytes []byte) ([]byte, error) {
+func exchange(ctx context.Context, options commonOptions, logger *log.Logger, metrics *transport.Metrics, serverHost string, serverPort int, requestBytes []byte) ([]byte, error) {
 	routerAddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(options.routerHost, strconv.Itoa(options.routerPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve router address: %w", err)
@@ -312,8 +333,12 @@ func exchange(ctx context.Context, options commonOptions, serverHost string, ser
 	}
 
 	session, err := transport.DialContext(ctx, routerAddr, serverAddr, transport.Config{
-		WindowSize: options.windowSize,
-		Timeout:    options.timeout,
+		WindowSize:     options.windowSize,
+		Timeout:        options.timeout,
+		MaxMessageSize: options.maxMessageSize,
+		LogEvents:      options.logTransport,
+		Logger:         logger,
+		Metrics:        metrics,
 	})
 	if err != nil {
 		return nil, err
@@ -325,6 +350,14 @@ func exchange(ctx context.Context, options commonOptions, serverHost string, ser
 	}
 
 	return session.ReceiveMessage(ctx, 1)
+}
+
+func newTransportLogger(stderr io.Writer, enabled bool) *log.Logger {
+	if !enabled {
+		return log.New(io.Discard, "", log.LstdFlags)
+	}
+
+	return log.New(stderr, "httpc: ", log.LstdFlags)
 }
 
 func loadBody(inlineData string, filePath string) ([]byte, error) {
@@ -382,9 +415,12 @@ func printGetUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --router-host        Router host. Default: localhost.")
 	fmt.Fprintln(w, "  --router-port        Router port. Default: 3000.")
 	fmt.Fprintln(w, "  --server-port        Default UDP server port when the URL omits a port. Default: 8007.")
-	fmt.Fprintln(w, "  --timeout            Retransmission timeout. Default: 2s.")
+	fmt.Fprintln(w, "  --timeout            Initial retransmission timeout. Default: 2s.")
 	fmt.Fprintln(w, "  --deadline           Overall request deadline. Default: 30s.")
 	fmt.Fprintln(w, "  --window-size        Sliding window size. Default: 5.")
+	fmt.Fprintln(w, "  --max-message-size   Maximum transport message size in bytes. Default: 8388608.")
+	fmt.Fprintln(w, "  --log-transport      Enable transport session and RTO logging.")
+	fmt.Fprintln(w, "  --metrics            Print aggregate transport metrics to stderr.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Legacy compatibility:")
 	fmt.Fprintln(w, "  --serverhost         Legacy URL flag from the Python version.")
@@ -406,7 +442,10 @@ func printPostUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --router-host        Router host. Default: localhost.")
 	fmt.Fprintln(w, "  --router-port        Router port. Default: 3000.")
 	fmt.Fprintln(w, "  --server-port        Default UDP server port when the URL omits a port. Default: 8007.")
-	fmt.Fprintln(w, "  --timeout            Retransmission timeout. Default: 2s.")
+	fmt.Fprintln(w, "  --timeout            Initial retransmission timeout. Default: 2s.")
 	fmt.Fprintln(w, "  --deadline           Overall request deadline. Default: 30s.")
 	fmt.Fprintln(w, "  --window-size        Sliding window size. Default: 5.")
+	fmt.Fprintln(w, "  --max-message-size   Maximum transport message size in bytes. Default: 8388608.")
+	fmt.Fprintln(w, "  --log-transport      Enable transport session and RTO logging.")
+	fmt.Fprintln(w, "  --metrics            Print aggregate transport metrics to stderr.")
 }
