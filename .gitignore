@@ -6,3 +6,4 @@ coverage.out
 .gomodcache/
 .tmp-*
 router.log
+.env
